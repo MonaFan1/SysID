@@ -68,6 +68,10 @@ gyro 话题类型是 Eigen::Matrix<float,3,1>、单位 rad/s；Euler 是 LibXR::
 
 BMI088/AHRS 依赖只负责数据提供；使用其他 IMU 时，可以提供相同类型和单位的话题，按实际提供者调整 manifest。零力矩手动刻度检查 command_=2 不要求 IMU。
 
+## 反馈检查
+
+使用示例实例名时，可在 Ozone 观察 `g_sysid.last_rx_us_`（收到匹配 CAN 帧的时间，运行中应持续更新）、`motor_yaw.no_response_count_`（持续有反馈时接近 0），以及 `motor_yaw.feedback_.position/omega/torque/temp`。`state=1` 只说明曾收到反馈。保持 command_=0，手动转动时 position 应跟随变化。静态对象如不能按短名称找到，在生成的 XRobotMain 中展开实例。
+
 ## 导出与拟合
 
 确认 done_=true，正常完成为 status_=2。Ozone Save Memory Data 起点为 &g_sysid.buf_[0] 解析出的地址，Size 按十六进制填写 **C008**，即 **49160 字节**。不导出整个对象。
