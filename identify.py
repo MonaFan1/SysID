@@ -43,13 +43,13 @@ def decode(raw):
     if len(raw)!=0x12080:
         raise ValueError('Restored capture: export &g_sysid.capture_, hex Size 12080 (73856 bytes).')
     magic,version,size,capacity,count,status,seed,reserved=struct.unpack_from('<8I',raw)
-    if (magic,version,size,capacity)!=(0x59534944,2,48,1536):
+    if magic!=0x59534944 or version not in (2,3) or size!=48 or capacity!=1536:
         raise ValueError('Wrong restored capture header/address/firmware.')
     if status in (0,1) or not 2<=count<=1536:
         raise ValueError('Capture is still running or contains too few samples.')
     names=['center','min_position','max_position','amplitude','kp','kd','torque_limit','max_travel','settle_s','excite_s','return_s','log_period_s','hold_fast_s','hold_mid_s','hold_slow_s','torque_constant','command_quantum']
     meta=dict(zip(names,struct.unpack_from('<17f',raw,32)))
-    meta.update(status=status,status_text='done' if status==2 else 'stopped status '+str(status),count=count,seed=seed,format_version='restored-v2')
+    meta.update(status=status,status_text='done' if status==2 else 'stopped status '+str(status),count=count,seed=seed,format_version='interval-v3' if version==3 else 'restored-v2')
     rows=[struct.unpack_from('<10f2I',raw,128+48*i) for i in range(count)]
     if rows[0][0]!=0:raise ValueError('Initial sample missing.')
     for i,r in enumerate(rows):
@@ -62,19 +62,36 @@ def fit_candidates(rows, metadata, fixed_j=None):
     from scipy.integrate import cumulative_trapezoid
     from scipy.optimize import lsq_linear
     from scipy.signal import savgol_filter
-    a = np.asarray(rows)
+    a = np.asarray(rows,dtype=float)
+    interval_mode=metadata.get('format_version')=='interval-v3'
+    if interval_mode:
+        centers=.5*(a[1:,0]+a[:-1,0])
+        a=a[1:].copy()
+        a[:,0]=centers
+        a[:,1]=a[:,9]  # same-interval mean encoder position
     t, q = a[:, 0], a[:, 1] - metadata['center']
     # Apply smoothing only to the velocity endpoints, no noisy differentiation.
     dt = float(np.median(np.diff(t)))
     length = max(5, int(round(.06 / dt)) | 1)
     if len(a) < length + 20:
         raise ValueError('Not enough data for a dynamic fit.')
-    w = savgol_filter(a[:, 2], length, 2)
-    terms = np.column_stack([w, np.sign(w), q, np.ones(len(t))])
+    # V3 already averaged ALL high-rate IMU samples over the torque interval.
+    # Never smooth velocity alone: that gives it a different transfer function.
+    w = a[:,2].copy() if interval_mode else savgol_filter(a[:, 2], length, 2)
+    sign_basis=np.sign(w)
+    if interval_mode:
+        # Apply one identical linear filter to EVERY term in the equation.
+        sign_basis=savgol_filter(sign_basis,length,2)
+        w=savgol_filter(w,length,2)
+        q=savgol_filter(q,length,2)
+        for col in (4,5):a[:,col]=savgol_filter(a[:,col],length,2)
+    terms = np.column_stack([w, sign_basis, q, np.ones(len(t))])
     integrals = cumulative_trapezoid(terms, t, axis=0, initial=0)
     report = {'model': 'tau = J*domega/dt + b*omega + fc*sign(omega) + k*q + offset',
               'state': 'IMU yaw axis; base/big yaw fixed, pitch near calibrated zero and fixed',
-              'velocity_source': 'signed IMU gyro axis; 60 ms endpoint smoothing',
+              'measurement_alignment': 'common interval centers' if interval_mode else 'legacy endpoints',
+              'velocity_source': 'full-rate gyro interval means, matched to torque intervals' if interval_mode else 'signed IMU gyro axis; 60 ms endpoint smoothing',
+              'estimator': 'PRBS instrumental-variable integral fit' if interval_mode else 'legacy integral least squares',
               'fits': {}, 'warnings': [
                   'Candidates only; validate with another seed/capture.',
                   'Feedback torque is current-derived using configured Kt, not a torque sensor.',
@@ -83,12 +100,23 @@ def fit_candidates(rows, metadata, fixed_j=None):
     if metadata['status'] != 2:
         report['warnings'].append(metadata['status_text'])
     moving = (a[:, 10] >= 1) & (a[:, 10] <= 3) & (np.abs(w) >= .06)
+    instruments=None
+    if interval_mode:
+        from scipy.signal import lfilter
+        excitation=a[:,6]
+        z=[np.ones(len(t)),q,np.sign(np.gradient(q,t)),excitation]
+        for pole in (2.,5.,10.,20.):
+            alpha=np.exp(-pole*dt)
+            z.append(lfilter([1-alpha],[1,-alpha],excitation))
+        instruments=np.column_stack(z)
+        zareas=cumulative_trapezoid(instruments,t,axis=0,initial=0)
     for source, column in [('feedback', 5), ('command', 4)]:
         # Each logged torque is the mean over the interval ENDING at its row.
-        area = np.r_[0., np.cumsum(a[1:, column] * np.diff(t))]
+        area = (cumulative_trapezoid(a[:,column],t,initial=0) if interval_mode
+                else np.r_[0., np.cumsum(a[1:, column] * np.diff(t))])
         estimates = []
         for window in [.04, .08, .16]:
-            x, y, ends = [], [], []
+            x, y, ends, zrows = [], [], [], []
             for i in range(1, len(t) - 2, 2):
                 j = int(np.searchsorted(t, t[i] + window))
                 if j >= len(t):
@@ -101,6 +129,8 @@ def fit_candidates(rows, metadata, fixed_j=None):
                     continue
                 x.append(np.r_[w[j]-w[i], integrals[j]-integrals[i]])
                 y.append(area[j]-area[i]); ends.append(t[j])
+                if instruments is not None:
+                    zrows.append(np.r_[zareas[j]-zareas[i],instruments[j,3:]-instruments[i,3:]])
             if len(x) < 30:
                 estimates.append({'window_s': window, 'available': False,
                                   'reason': 'Too few moving windows (sticking/early stop).',
@@ -118,7 +148,17 @@ def fit_candidates(rows, metadata, fixed_j=None):
             if fixed_j is not None:
                 lower,upper=lower[1:],upper[1:]
             def solve(mask):
-                f = lsq_linear(x[mask]/scale, y[mask],
+                design,response=x[mask],y[mask]
+                if instruments is not None:
+                    z=np.asarray(zrows)[mask]
+                    zn=np.linalg.norm(z,axis=0)
+                    z=z[:,zn>1e-10]/zn[zn>1e-10]
+                    # Two-stage least squares: PRBS-based instruments reduce
+                    # gyro errors-in-variables and closed-loop correlation.
+                    projection=np.linalg.lstsq(z,np.column_stack([design,response]),rcond=1e-6)[0]
+                    projected=z@projection
+                    design,response=projected[:,:-1],projected[:,-1]
+                f = lsq_linear(design/scale, response,
                                bounds=(lower*scale, upper*scale), tol=1e-12)
                 return f.x/scale
             p = solve(np.ones(len(x), dtype=bool))
@@ -145,6 +185,30 @@ def fit_candidates(rows, metadata, fixed_j=None):
     return report
 
 
+def check_input_delays(rows,metadata,fixed_j=None):
+    """Diagnostic candidates selected by held-out-stage residual, never by a target J."""
+    import numpy as np
+    a=np.asarray(rows,dtype=float)
+    result={}
+    for source,col in [('command',4),('feedback',5)]:
+        candidates=[]
+        for advance in (-.02,-.01,0.,.01,.02):
+            shifted=a.copy()
+            shifted[:,col]=np.interp(a[:,0]+advance,a[:,0],a[:,col])
+            report=fit_candidates(shifted.tolist(),metadata,fixed_j)
+            for fit in report['fits'][source]:
+                error=fit.get('last_stage_validation_rmse_nm_s')
+                if fit.get('available') and error is not None and not fit['parameter_at_bound']:
+                    candidates.append(dict(input_advance_s=advance,window_s=fit['window_s'],
+                        validation_torque_rmse_nm=error/fit['window_s'],
+                        J_kg_m2=fit['J_kg_m2'],b_nm_s_rad=fit['b_nm_s_rad']))
+        result[source]={'definition':'positive advance uses later torque samples; not proof of a sensor-only delay',
+                        'selection':'held-out last-stage residual; independent capture still required',
+                        'best_candidate':min(candidates,key=lambda x:x['validation_torque_rmse_nm']) if candidates else None,
+                        'candidates':candidates}
+    return result
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('binary', type=Path)
@@ -163,6 +227,8 @@ def main():
         out.with_suffix('.metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
         if args.fit:
             result = fit_candidates(rows, metadata, args.fixed_j)
+            if metadata.get('format_version')=='interval-v3':
+                result['input_delay_check']=check_input_delays(rows,metadata,args.fixed_j)
             out.with_suffix('.fit.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
             print(json.dumps(result, indent=2))
         print(f"{metadata['status_text']}: {len(rows)} samples, {rows[-1][0]:.3f} s -> {out}")

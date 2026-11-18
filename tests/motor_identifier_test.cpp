@@ -76,7 +76,7 @@ int main() {
     physical.Receive();
     id.Poll();
   }
-  assert(motor.output != 0 && id.capture_.header.version == 2);
+  assert(motor.output != 0 && id.capture_.header.version == 3);
   assert(std::fabs(id.tau_cmd_ - observed.Torque()) < 1e-7f);
   assert(id.capture_.samples[1].stage == 0);
   id.command_ = 0;
@@ -98,8 +98,8 @@ int main() {
     assert(!id.done_);
   }
   motor.interrupt_can = nullptr;
-  Imu();
   LibXR::Timebase::now += 51000;
+  Imu();
   id.Poll();
   assert(id.status_ == Status::FEEDBACK_LOST && motor.output == 0);
   Imu();

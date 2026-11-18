@@ -1,7 +1,7 @@
 # SysID
 
 IMU 电机闭环系统辨识，原生 XRobot/YAML 实例化，Ozone 改 command_ 启动。
-当前默认恢复为 Double Yaw 的三阶段二电平激励、完整区间采样与实际 CAN 打包力矩记录。
+当前使用 Double Yaw 的三阶段二电平激励、实际 CAN 打包力矩记录，以及 v3 同区间 IMU 积分平均采样。
 通用模块没有写入机械惯量、机器零点或专用限位。
 
 ## 按 XRobot 1.0.1 接入
@@ -39,9 +39,9 @@ SysID 对被测电机独占 Update/Control/Relax。一个物理 CAN 总线一次
 这些值在 Ozone 启动时锁存。开始前可编辑 amplitude_、kp_、kd_、torque_limit_、max_travel_、
 min_position_、max_position_、seed_。默认绝对边界为 ±1000000，实际机构应在 YAML 指定。
 
-Experiment.hpp 保留昨天的 LFSR、阶段切换、控制输出、先积分上一控制区间再记录的顺序、
-端点角度/角速度、力矩区间均值和样本标志。参考对照测试对同一输入逐步比较，
-请求力矩、阶段和所有 48 字节样本与原核心完全一致。
+Experiment.hpp 保留昨天的 LFSR、阶段切换和先积分上一控制区间再记录的顺序。
+核心的参考模式与原核心逐样本一致；实际适配器现在启用 v3 区间测量，以免在 100 Hz 下直接抽取高带宽 IMU 的端点值。
+IMU 使用带硬件时间戳的 32 条队列，消费每次发布；PD 使用当前控制区间的陀螺仪平均值，日志使用整段记录区间的原始陀螺仪积分均值。
 与昨天专用 GM6020 代码的区别是接入可配置、参数/故障码与文件版本标准化。
 这项软件对照不保证物理实验每次得到同一个 J、b，仍需相同负载、安装和固定条件验证。
 
@@ -90,8 +90,8 @@ omega_imu_、omega_motor_、pitch_imu_、time_s_、count_、stage_、prbs_、pd_
 **起点改为 &g_sysid.capture_，Size 十六进制 12080，即 73856 字节。不要再使用 buf_ / C008。**
 先确认 done_=true 并暂停 CPU，再 Save Memory Data。收起 Watch 大数组，不展开整个 capture_。
 格式为 128 字节头＋1536×48 字节样本。头中记录配置、有效数量和终止状态；样本记录时间、
-绝对位置、IMU/电机速度、总命令/反馈/激励/PD 区间均值、pitch、gyro_y、阶段、标志。
-新版本号为 2；终止码采用本模块定义。样本数学约定与昨天一致。
+绝对位置端点、IMU 角速度区间均值、电机速度端点、总命令/反馈/激励/PD 区间均值、pitch、位置区间均值、阶段、标志。
+新版本号为 3；第十个 float 由旧 gyro_y 改为位置区间均值，大小不变。终止码采用本模块定义。
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -99,7 +99,8 @@ python identify.py capture.bin --fit
 ```
 
 输出 CSV、metadata.json、fit.json。解码器也能读取之前 C008 的四电平格式用于历史比较。
-拟合仍是昨天的积分最小二乘，分别比较命令/反馈力矩、40/80/160 ms 窗口。
+v1/v2 数据保留旧积分最小二乘；v3 将区间均值放到共同时间中心，使用相同线性滤波处理等式各项，并以 PRBS 构造工具变量做两阶段积分拟合，减少速度测量误差和闭环相关性带来的偏差。
+分别比较命令/反馈力矩和 40/80/160 ms 窗口，同时输出 ±20 ms 输入对齐候选，按末段留出残差筛选，绝不按已知 J 选择时延。时延结果不是独立传感器标定，仍需不同种子的记录验证。
 模型 tau=J*domega/dt+b*omega+fc*sign(omega)+k*q+offset；总输入已含 PD，不再从 b 中减 kd。
 --fixed-j 只用于用户提供独立可信 J 后的条件拟合，默认不固定 J。
 
@@ -107,4 +108,6 @@ python identify.py capture.bin --fit
 
 安装 numpy/scipy 和 g++ 后运行 python tests/run_tests.py。
 包括原核心逐样本对照、实际 CAN 编码和入队错误、CAN 中断时序、YAML 参数及线程初始化、
-旧/新解码与模拟参数恢复。tests/reference 保存原核心作为对照，不参与固件。
+旧/新解码、全速降采样前抗混叠测试与含噪闭环模拟参数恢复。tests/reference 保存原核心作为对照，不参与固件。
+
+模拟验证使用独立参数 J=0.006/0.012/0.024、b=0.04/0.09/0.15 及 0.08 rad/s 的源端速度噪声；它不能替代真实机构的精度验证。

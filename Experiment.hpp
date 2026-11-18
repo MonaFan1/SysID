@@ -95,6 +95,11 @@ public:
   volatile float max_position_ = 1000000.0f;
   volatile uint32_t seed_ = 0xACE1;
   Capture capture_{};
+  // V3 adapter supplies full-rate gyro integrals. Core-only reference mode
+  // stays endpoint-based so the restored experiment can be regression-tested.
+  bool interval_measurements_ = false;
+  float gyro_area_ = 0;
+  uint64_t gyro_stamp_us_ = 0;
 
   bool Active() const { return active_; }
   void Cancel(Status reason) { Stop(reason); }
@@ -122,6 +127,8 @@ public:
     // command. This avoids attributing the next PRBS bit to the last response.
     time_ += input.dt;
     interval_ += input.dt;
+    position_integral_ += previous_position_ * input.dt;
+    previous_position_ = input.position;
     cmd_integral_ += previous_tau_ * input.dt;
     feedback_integral_ += input.torque_feedback * input.dt;
     excitation_integral_ += previous_prbs_ * input.dt;
@@ -220,7 +227,7 @@ private:
     auto &h = capture_.header;
     h = {};
     h.magic = 0x59534944;
-    h.version = 2;
+    h.version = interval_measurements_ ? 3 : 2;
     h.sample_bytes = sizeof(Sample);
     h.capacity = CAPACITY;
     h.seed = seed_;
@@ -245,6 +252,10 @@ private:
     done_ = false;
     time_ = 0.0f;
     time_s_ = 0.0f;
+    position_integral_ = 0;
+    previous_position_ = input.position;
+    last_gyro_area_ = gyro_area_;
+    last_gyro_stamp_ = gyro_stamp_us_;
     interval_ = 0.0f;
     cmd_integral_ = feedback_integral_ = 0.0f;
     excitation_integral_ = pd_integral_ = 0.0f;
@@ -299,16 +310,29 @@ private:
     auto &h = capture_.header;
     if (h.count >= CAPACITY || interval_ <= 0.0f)
       return false;
+    float RECORDED_SPEED = input.omega_gyro;
+    float RECORDED_POSITION = input.gyro_y;
+    if (interval_measurements_) {
+      if (gyro_stamp_us_ > last_gyro_stamp_) {
+        const float SPAN =
+            static_cast<float>(gyro_stamp_us_ - last_gyro_stamp_) * 1e-6f;
+        RECORDED_SPEED = (gyro_area_ - last_gyro_area_) / SPAN;
+      }
+      RECORDED_POSITION = position_integral_ / interval_;
+      last_gyro_area_ = gyro_area_;
+      last_gyro_stamp_ = gyro_stamp_us_;
+      position_integral_ = 0;
+    }
     capture_.samples[h.count] = {time_,
                                  input.position,
-                                 input.omega_gyro,
+                                 RECORDED_SPEED,
                                  input.omega_motor,
                                  cmd_integral_ / interval_,
                                  feedback_integral_ / interval_,
                                  excitation_integral_ / interval_,
                                  pd_integral_ / interval_,
                                  input.pitch,
-                                 input.gyro_y,
+                                 RECORDED_POSITION,
                                  previous_stage_,
                                  flags_};
     h.count++;
@@ -332,6 +356,8 @@ private:
     pd_ = 0.0f;
     return 0.0f;
   }
+  float position_integral_ = 0, previous_position_ = 0, last_gyro_area_ = 0;
+  uint64_t last_gyro_stamp_ = 0;
   bool active_ = false, previous_saturated_ = false;
   uint16_t lfsr_ = 0;
   uint32_t previous_stage_ = 0, flags_ = 0;

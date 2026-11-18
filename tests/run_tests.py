@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory(prefix='sysid-test-') as folder:
         ('adapter', 'motor_identifier_test.cpp', ['-I', str(root/'tests/stubs')]),
         ('entry', 'sysid_entry_test.cpp', ['-I', str(root/'tests/stubs')]),
         ('restored', 'restored_equivalence_test.cpp', []),
+        ('sampling', 'imu_sampling_test.cpp', ['-I', str(root/'tests/stubs')]),
     ):
         binary = output/(name + ('.exe' if os.name == 'nt' else ''))
         subprocess.run([compiler, '-std=c++17', '-O2', '-Wall', '-Wextra',
@@ -26,4 +27,5 @@ with tempfile.TemporaryDirectory(prefix='sysid-test-') as folder:
         subprocess.run([str(binary), str(output)], check=True)
     subprocess.run([sys.executable, str(root/'tests/test_identify.py'),
                     str(output)], check=True)
+subprocess.run([sys.executable,str(root/'tests/noisy_interval_fit_test.py')],check=True)
 print('All host tests passed. No hardware was accessed.')

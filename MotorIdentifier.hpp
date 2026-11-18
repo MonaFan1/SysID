@@ -56,6 +56,9 @@ public:
         last_poll_us_ ? static_cast<float>(NOW - last_poll_us_) * 1e-6f : .002f;
     last_poll_us_ = NOW;
     imu_.Update(NOW);
+    interval_measurements_ = true;
+    gyro_area_ = imu_.gyro_area_;
+    gyro_stamp_us_ = imu_.GyroTimestamp();
     omega_imu_ = imu_.omega_;
     pitch_imu_ = imu_.pitch_;
     const uint32_t COMMAND = command_;
@@ -80,7 +83,7 @@ public:
     last_rx_count_ = RX;
     const auto &FB = motor_->GetFeedback();
     omega_motor_ = FB.omega;
-    if (!imu_.Fresh(NOW))
+    if (!imu_.Fresh(static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds())))
       return Finish(IMU_OFFLINE);
     const uint32_t STAMP = last_rx_us_;
     // Load clock AFTER stamp: a CAN ISR can run after loop-start NOW.

@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "message.hpp"
+#include "queue/spsc_queue.hpp"
 #include "timebase.hpp"
 #include "transform.hpp"
 
@@ -21,9 +22,8 @@ public:
     axis_ = axis;
     sign_ = sign;
     pitch_zero_ = pitch_zero;
-    gyro_ = new GyroSubscriber(gyro_topic);
+    gyro_ = new LibXR::Topic::QueuedSubscriber(gyro_topic, gyro_queue_);
     euler_ = new EulerSubscriber(euler_topic);
-    gyro_->StartWaiting();
     euler_->StartWaiting();
     return true;
   }
@@ -31,14 +31,27 @@ public:
     gyro_new_ = false;
     if (!gyro_)
       return;
-    if (gyro_->Available()) {
-      const auto DATA = gyro_->GetData();
-      omega_ = sign_ * DATA(axis_);
-      gyro_y_ = DATA(1);
+    GyroMessage sample;
+    float block_area = 0, block_span = 0;
+    for (uint32_t n = 0;
+         n < 32 && gyro_queue_.Pop(sample) == LibXR::ErrorCode::OK; ++n) {
+      const uint64_t TS = sample.timestamp;
+      const float RAW = sign_ * sample.data(axis_);
+      gyro_y_ = sample.data(1);
+      if (gyro_stamp_ && TS > gyro_stamp_) {
+        const float DT = static_cast<float>(TS - gyro_stamp_) * 1e-6f;
+        const float AREA = .5f * (RAW + last_raw_) * DT;
+        gyro_area_ += AREA;
+        block_area += AREA;
+        block_span += DT;
+      }
+      last_raw_ = RAW;
+      omega_raw_ = RAW;
+      gyro_stamp_ = TS;
       gyro_new_ = true;
-      gyro_stamp_ = now;
-      gyro_->StartWaiting();
     }
+    if (gyro_new_)
+      omega_ = block_span > 0 ? block_area / block_span : last_raw_;
     if (euler_->Available()) {
       pitch_ = euler_->GetData().Pitch() - pitch_zero_;
       euler_stamp_ = now;
@@ -46,20 +59,23 @@ public:
     }
   }
   bool Fresh(uint64_t now) const {
-    // Receipt times at Poll(), not a hardware sensor timestamp. Never refresh
-    // the stamp merely because the last value is reused by the control loop.
+    // Gyro freshness uses the publisher hardware timestamp; Euler uses receipt
+    // time. Reusing a value never refreshes the timestamp.
     return gyro_stamp_ && euler_stamp_ && now - gyro_stamp_ <= 20000 &&
            now - euler_stamp_ <= 50000;
   }
   float omega_ = 0, pitch_ = 0, gyro_y_ = 0;
+  float omega_raw_ = 0, gyro_area_ = 0;
+  uint64_t GyroTimestamp() const { return gyro_stamp_; }
   bool gyro_new_ = false;
 
 private:
-  using GyroSubscriber =
-      LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>;
+  using GyroMessage = LibXR::Topic::Message<Eigen::Matrix<float, 3, 1>>;
   using EulerSubscriber =
       LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>>;
-  GyroSubscriber *gyro_ = nullptr;
+  LibXR::SPSCQueue<GyroMessage> gyro_queue_{32};
+  LibXR::Topic::QueuedSubscriber *gyro_ = nullptr;
+  float last_raw_ = 0;
   EulerSubscriber *euler_ = nullptr;
   uint32_t axis_ = 2;
   float sign_ = 1, pitch_zero_ = 0;
