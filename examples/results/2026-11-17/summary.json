@@ -9,7 +9,8 @@
     "J_kg_m2": 0.005505764873850784,
     "relative_difference_percent": 0.8381845027616207,
     "joint_parameter_at_bound": true,
-    "qualification": "Single historical candidate selected for inertia agreement; b reaches its lower bound. Not a general accuracy specification."
+    "qualification": "Single historical candidate selected for inertia agreement; b reaches its lower bound. Not a general accuracy specification.",
+    "difference_vs_reference_kg_m2": 4.576487385078449e-05
   },
   "joint_parameter_candidate": {
     "report": "yaw_actual_run3.fit.json",
@@ -21,5 +22,9 @@
     "joint_parameter_at_bound": false,
     "qualification": "Candidate without parameter bounds active; b and fc have no independent ground-truth comparison."
   },
-  "provenance": "Archived Double Yaw v1 fit/metadata reports. Raw captures and raw CSV are not included in this documentation update."
+  "provenance": "Archived Double Yaw v1 fit/metadata reports. Raw captures and raw CSV are not included in this documentation update.",
+  "possible_explanation_for_positive_difference": {
+    "hypothesis": "Moving cables/connectors may add inertia absent from a rigid-structure mechanical reference. Cable elasticity, friction and damping can also couple into fitted parameters.",
+    "verification_status": "Not isolated experimentally; the measured difference is not a direct measurement of cable inertia."
+  }
 }
