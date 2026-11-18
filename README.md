@@ -1,117 +1,110 @@
 # SysID
 
-基于 Motor 接口的单轴闭环系统辨识：四电平伪随机力矩＋弱 PD 回中，在 Ozone 修改一个命令启动。记录后通过积分最小二乘估计转动惯量 J、粘性阻尼 b；不预设任何机器的 J、零点或机械限位。
+IMU 电机闭环系统辨识，原生 XRobot/YAML 实例化，Ozone 改 command_ 启动。
+当前默认恢复为 Double Yaw 的三阶段二电平激励、完整区间采样与实际 CAN 打包力矩记录。
+通用模块没有写入机械惯量、机器零点或专用限位。
 
-## 按 XRobot 流程接入（1.0.1）
+## 按 XRobot 1.0.1 接入
 
-模块入口是 `SysID.hpp` 中的 `class SysID`，manifest 为 `standalone: true`。
-在 YAML 实例化后，`xrobot setup` / `xrobot gen` 自动生成电机、IMU、AHRS 和辨识器的构造代码；SysID 自己创建 2 ms 控制线程。无需手写 app_main 调用、Poll 循环或单独的启动头文件。
-
-1. 在 `Modules/sources.yaml` 的 sources 列表增加：
+1. 在 Modules/sources.yaml 的 sources 列表增加：
 
 ```yaml
 - url: https://raw.githubusercontent.com/MonaFan1/SysID/main/index.yaml
   priority: 0
 ```
 
-2. 在 `Modules/modules.yaml` 的 modules 列表增加 `MonaFan1/SysID@main`。入口 manifest 的 depends 自动拉取 Motor、RMMotor、DMMotor、BMI088、MadgwickAHRS。
-3. 完整应用配置参考 [examples/small_yaw.yaml](examples/small_yaw.yaml)：先实例化 BMI088、AHRS 和电机，再配置 SysID，motor 引用前面已经创建的电机，can_bus 使用该电机的实际 CAN。复制示例到 BSP 的 User/xrobot.yaml 后执行：
+2. 在 Modules/modules.yaml 的 modules 列表增加 MonaFan1/SysID@main。
+   SysID.hpp 的 depends 自动拉取 Motor、RMMotor、DMMotor、BMI088、MadgwickAHRS。
+3. 参考 [examples/small_yaw.yaml](examples/small_yaw.yaml)，依次实例化 IMU、AHRS、电机、SysID。
+4. **电机的 can_bus 使用 SysID::Observe(can1)，SysID 的 can_bus 使用实际 can1。**
+   记录层透明转发收发数据，并记录原驱动打包结果及 AddMessage 入队结果，不修改 QDU 驱动。
+5. 执行 xrobot setup、xrobot format、xrobot gen -c User/xrobot.yaml，然后正常构建。
+   无需写 app_main 调用、额外启动头文件或 Poll 线程。
 
-```powershell
-xrobot setup
-xrobot format
-xrobot gen -c User/xrobot.yaml
-cmake --preset debug
-cmake --build --preset debug
-```
+SysID 对被测电机独占 Update/Control/Relax。一个物理 CAN 总线一次绑定一个辨识目标，
+被测电机的控制组也须独占；不能同时交给 Gimbal 或其他控制器。
+本模块记录成功入队的实际字节，不把入队成功等同于电机已执行。
 
-SysID 的参数均通过构造参数 `param` 配置，示例包含 CAN 反馈 ID、力矩反馈符号、IMU 话题、gyro 分量/符号、pitch 零位、位置边界、激励/PD/采集参数及线程栈大小。示例里的 GM6020、CAN1、0x205、方向和限位只适用于该示例机器，移植时按实物配置，不是模块默认机器参数。模块不写入固定惯量。
+## 恢复的实验流程
 
-**电机独占**：这个 YAML 入口持续负责绑定电机的 Update/Control/Relax，空闲发送零输出。不能同时让 Gimbal 等其他控制器使用同一电机。RMMotor 同组其他电机仍须参与各自的驱动拼包。该对象及其硬件依赖保持静态生命周期。
-
-位置使用电机编码器，PD 与拟合速度使用有符号的 IMU 分量，电机速度另外记录对照。统一单位 rad、rad/s、N·m；固定底座、大 yaw 和 pitch，pitch 接近校准零位，安装轴对齐且 roll 固定。任意姿态下的 gyro.z 不等于 Euler yaw 的导数。结果是这些机械条件下的单轴等效参数。
-
-公开版 DM 已对反向配置的反馈力矩取反，feedback_torque_sign 通常 +1；当前公开版 RM 未翻转反向配置的反馈力矩，reverse=true 时设为 -1。实际 gyro 分量/符号指 IMU rotation 之后的坐标，应满足编码器 position 增大时使用的角速度为正。
-
-低层 `MotorIdentifier.hpp` 保留手动 Bind/Poll 接口，供已有控制循环的高级集成使用；常规 XRobot 用户使用上面的 SysID 入口。
-
-## Ozone 启动与参数
-
-YAML 实例 id 建议为 g_sysid。调试器若无法直接按短名称找到它，可在生成的 XRobotMain 中查看同名静态对象。上电线程自动启动，ready_=true 表示绑定完成；实验仍空闲，不自动开始。先固定底座/大 yaw，并将 pitch 保持在校准零位、yaw 放在有活动余量的位置，再改参数，最后将 command_ 改为 1。参数在启动时锁存，中途修改下次才生效。
-
-| Watch 变量（前缀 g_sysid.） | 默认 | 含义 |
+| 阶段 | 时间 | 激励 |
 | --- | --- | --- |
-| command_ | 0 | 1 启动 PRBS＋PD；0 停止；2 零力矩手动刻度检查 |
-| amplitude_ | 0.10 | 激励基数 N·m，四档为 ±0.75A、±0.25A |
-| kp_ / kd_ | 2 / 0.12 | 相对启动位置的回中 PD |
-| torque_limit_ | 0.20 | 总力矩上限 N·m，范围 (0,2] |
-| max_travel_ | 0.06 | 相对起点单侧最大行程 rad，范围 (0,0.5] |
-| min_position_ / max_position_ | ±1000000 | 绝对编码边界，默认未设置，按机构填写 |
-| duration_s_ | 14 | 总时长 s，范围 (2,14]，首尾各 1 s 只有 PD |
-| hold_s_ | 0.10 | 档位保持时间 s，范围 [0.02,1] |
-| seed_ | 0xACE1 | 16 位非零种子；换种子复测 |
+| 稳定 | 0～2 s | 只有回中 PD |
+| 快档 | 2～6 s | 二电平 ±A，保持 0.04 s |
+| 中档 | 6～10 s | 二电平 ±0.65A，保持 0.10 s |
+| 慢档 | 10～14 s | 二电平 ±A，保持 0.25 s |
+| 收尾 | 14～15 s | 只有回中 PD |
 
-默认配置需按机构调整；若不能产生持续运动，无法可靠辨识 J、b。command_=2 仅供手动检查刻度，全程零力矩，不用于 J、b 辨识。
+默认 A=0.07 N·m、kp=2、kd=0.12、总力矩上限 0.20 N·m、相对单侧行程 0.06 rad、seed=0xACE1。
+这些值在 Ozone 启动时锁存。开始前可编辑 amplitude_、kp_、kd_、torque_limit_、max_travel_、
+min_position_、max_position_、seed_。默认绝对边界为 ±1000000，实际机构应在 YAML 指定。
 
-正常运行约 14 s 自动退出并将 command_ 清零，缓冲区冻结。中途 command_=0 也会退出。试验期间暂停调试会破坏时序，需重新开始；启动前的暂停不计入试验。50 ms 无反馈视为失联，开始前最多等待约 5 s；温度达到 75℃、超速、越界也会退出，最大允许控制周期 20 ms。退出时撤销输出并调用 Relax。
+Experiment.hpp 保留昨天的 LFSR、阶段切换、控制输出、先积分上一控制区间再记录的顺序、
+端点角度/角速度、力矩区间均值和样本标志。参考对照测试对同一输入逐步比较，
+请求力矩、阶段和所有 48 字节样本与原核心完全一致。
+与昨天专用 GM6020 代码的区别是接入可配置、参数/故障码与文件版本标准化。
+这项软件对照不保证物理实验每次得到同一个 J、b，仍需相同负载、安装和固定条件验证。
 
-status_：0 等待/手动停止，1 运行，2 完成，3 参数或采样非法，4 反馈丢失，5 超速，6 位置跳变或绝对边界越界，7 缓冲区满，8 单位未确认，9 旧恒速模式未停稳，10 相对行程越界，11 过温，12 命令非法，13 IMU 未接入或失联，14 pitch 不在校准零位附近或试验中变化超过 0.05 rad。
+## 单位、方向与硬件条件
 
-theta_ 是相对起点位置；omega_ 是位置窗口斜率诊断值。PD 和新版日志使用带方向符号的 IMU 角速度。omega_imu_ 可直接观察，omega_motor_ 为电机速度，pitch_imu_ 为相对校准零位的 pitch。通用默认速度上限为 3 rad/s，IMU 与电机速度均检查。
+位置由电机编码器提供，用于回中/限位；角速度由 IMU 提供，用于 PD 和拟合。
+角度/角速度/力矩必须对应同一个机械自由度，单位 rad、rad/s、N·m。
+固定底座、大 yaw 和 pitch，使 pitch 接近机械零位、安装轴对齐且 roll 固定。
+直接使用 gyro 分量没有任意姿态下的 yaw 投影补偿。pitch 检查恢复为相对启动姿态变化不超过 0.05 rad。
 
+YAML 中的 gyro_axis 是 IMU rotation 之后的分量（0/1/2 对应 x/y/z），gyro_sign 统一到 position 正方向。
+pitch_zero 只补偿已确认的坐标零偏，不能用它把实际抬头伪装成水平。
+BMI088 话题类型 Eigen::Matrix<float,3,1>，Euler 为 LibXR::EulerAngle<float>。
+gyro 20 ms、Euler 50 ms、电机反馈 50 ms 未更新会退出，不回退到其他速度源。
 
-### IMU 接线与配置说明
+公开版反向 RM 的反馈力矩保持原始符号，所以示例 reverse=true 时 feedback_torque_sign=-1。
+DM 已翻转反馈力矩，通常为 +1。实际 CAN 命令映射使用参数：
 
-YAML 参数 gyro_topic_name、euler_topic_name、gyro_axis（0=x、1=y、2=z）、gyro_sign、pitch_zero 分别指定话题、分量、方向和 pitch 零位。分量指 BMI088 发布话题已经执行 rotation 变换之后的坐标，不能把安装变换重复做一遍。上面的示例选择 -gyro.z()；实际机构必须验证正方向：编码器 position 增大时，omega_imu_ 也应为正。
+- tx_id：控制帧 ID；tx_byte_offset：两个力矩字节起始位置。
+- tx_encoding：SIGNED16（RM 电流编码）或 UNSIGNED12（DM MIT 末 12 位）。
+- tx_torque_scale / tx_torque_bias：位置正方向力矩 = 原始编码 × scale + bias。
+- torque_constant：记录用电机力矩常数，不能填机械惯量。
 
-gyro 话题类型是 Eigen::Matrix<float,3,1>、单位 rad/s；Euler 是 LibXR::EulerAngle<float>、单位 rad。ImuFeedback 在 Poll 内自己取话题，不用 Gimbal 转发。gyro 超过 20 ms、Euler 超过 50 ms 未更新就退出，且不会回退到电机速度。这里的新鲜度按本模块读取新话题的时刻计算，不是传感器硬件采样时间。pitch 相对 pitch_zero 指定零位必须在 ±0.05 rad，运行中变化也不能超过 0.05 rad。
+GM6020 示例使用 0x1FE、字节 0、scale=(-0.741f*3.0f/16384.0f)、bias=0、torque_constant=0.741。
+这是示例机器和驱动的编码配置，不写死在算法中。DM MIT 可设置字节 6，scale=方向×2Tmax/4095、
+bias=方向×(-Tmax)，并核实电机内部量程与驱动一致。
 
-BMI088/AHRS 依赖只负责数据提供；使用其他 IMU 时，可以提供相同类型和单位的话题，按实际提供者调整 manifest。零力矩手动刻度检查 command_=2 不要求 IMU。
+## Ozone 启动与观测
 
-## 反馈检查
+实例名建议 g_sysid。上电 ready_=true 后线程运行但实验空闲，command_=0。
+确认反馈、位置及安装条件后将 command_=1；默认运行 15 s 后 command_ 自动清零。
+command_=0 可中止。原 command_=2 的独立检查模式不属于恢复流程。
+试验时不要暂停 CPU；完成后再暂停并导出。重新启动会覆盖上一条记录。
 
-使用示例实例名时，可在 Ozone 观察 `g_sysid.last_rx_us_`（收到匹配 CAN 帧的时间，运行中应持续更新）、`motor_yaw.no_response_count_`（持续有反馈时接近 0），以及 `motor_yaw.feedback_.position/omega/torque/temp`。`state=1` 只说明曾收到反馈。保持 command_=0，手动转动时 position 应跟随变化。静态对象如不能按短名称找到，在生成的 XRobotMain 中展开实例。
+done_ 只表示结束，status_=2 才是正常完成。状态码：0 等待、1 运行、2 完成、3 输入/参数非法、
+4 电机失联、5 超速、6 绝对位置边界、7 缓冲区满、10 相对行程、11 过温、12 命令非法、
+13 IMU 失联、14 pitch 变化、15 CAN 入队失败、16 手动停止、17 周期非法、18 未观察到命令帧。
+18 通常需检查电机是否使用 SysID::Observe(can1)、目标控制帧映射和控制组独占条件。
 
-## 导出与拟合
+Watch 可看 last_rx_us_、motor_yaw.no_response_count_、motor_yaw.feedback_.position/omega/torque/temp、
+omega_imu_、omega_motor_、pitch_imu_、time_s_、count_、stage_、prbs_、pd_、tau_cmd_。
+短名称无法解析时在生成的 XRobotMain 中展开静态实例。
 
-确认 done_=true，正常完成为 status_=2。Ozone Save Memory Data 起点为 &g_sysid.buf_[0] 解析出的地址，Size 按十六进制填写 **C008**，即 **49160 字节**。不导出整个对象。
+## 导出：新版恢复格式
 
-0xC000 字节为 1536 个 32 字节样本，最后 8 字节为写入索引、有效数量。样本依次为：时间、上一记录区间总命令力矩均值、相对位置、IMU 端点角速度、电机端点角速度、反馈力矩区间均值、阶段、标志（六个 float32、两个 uint32，小端）。IMU PRBS 阶段为 400/401/403；旧电机速度版本的 300/301/303 数据不被新版脚本接受。与 Double Yaw 及旧模式格式不同。文件不含终止状态，须另看 Ozone 的 status_。
+**起点改为 &g_sysid.capture_，Size 十六进制 12080，即 73856 字节。不要再使用 buf_ / C008。**
+先确认 done_=true 并暂停 CPU，再 Save Memory Data。收起 Watch 大数组，不展开整个 capture_。
+格式为 128 字节头＋1536×48 字节样本。头中记录配置、有效数量和终止状态；样本记录时间、
+绝对位置、IMU/电机速度、总命令/反馈/激励/PD 区间均值、pitch、gyro_y、阶段、标志。
+新版本号为 2；终止码采用本模块定义。样本数学约定与昨天一致。
 
 ```powershell
-python -m pip install numpy scipy
-python ./identify.py ./capture.bin --fit
+python -m pip install -r requirements.txt
+python identify.py capture.bin --fit
 ```
 
-输出同名 CSV、metadata.json、fit.json。默认同时估计未知 J、b；已有独立可信 J 时可额外传 --fixed-j 数值，由用户提供，不写死在模块里。
+输出 CSV、metadata.json、fit.json。解码器也能读取之前 C008 的四电平格式用于历史比较。
+拟合仍是昨天的积分最小二乘，分别比较命令/反馈力矩、40/80/160 ms 窗口。
+模型 tau=J*domega/dt+b*omega+fc*sign(omega)+k*q+offset；总输入已含 PD，不再从 b 中减 kd。
+--fixed-j 只用于用户提供独立可信 J 后的条件拟合，默认不固定 J。
 
-拟合模型：tau = J*domega/dt + b*omega + fc*sign(omega) + k*q + offset。对 40/80/160 ms 区间积分，避免直接差分速度；比较命令、反馈力矩两组结果。使用激励与 PD 合成、限幅后的总输入，所以不再从结果 b 中减去 kd。
+## 测试
 
-附加摩擦、位置和偏置项用于减轻遗漏项影响，并非保证每项均可独立辨识。脚本剔除限幅、低速和跨正反转的窗口，并报告条件数、边界、末段留出误差。不同窗口、输入和种子结果应接近。闭环相关性、噪声和延迟仍可能造成偏差，需换种子复测。反馈力矩是基于电流/协议量程的估计，不是独立传感器。
-
-旧 MATLAB 流程本身也使用最小二乘/模型拟合。新版主要改进在区间积分、总力矩输入和窗口检查，并不是“最小二乘对另一种完全不同算法”。
-
-## 文件
-
-- SysID.hpp：XRobot/YAML 入口、参数绑定和自动线程。
-- MotorIdentifier.hpp：Motor/CAN/IMU 适配与 Ozone 启停。
-- ImuFeedback.hpp：独立订阅角速度和姿态话题、检查新鲜度。
-- MotorSystemID.hpp：无硬件依赖的激励与采集核心，保留旧检查模式。
-- identify.py：新版 PRBS 解码及离线积分拟合。
-- tests：模拟采集与拟合验证。
-
-
-## 本机测试
-
-在仓库根目录运行，需要 Python、numpy/scipy 和 PATH 中的 g++。可以执行 `python tests/run_tests.py` 完成所有模拟测试；也可逐项运行下面命令。使用临时目录存放模拟数据和可执行文件，不需要连接电机：
-
-```powershell
-New-Item -ItemType Directory -Force $env:TEMP/sysid-test
-g++ -std=c++17 -O2 -I . ./tests/motor_sysid_test.cpp -o $env:TEMP/sysid-test/core.exe
-& $env:TEMP/sysid-test/core.exe $env:TEMP/sysid-test
-g++ -std=c++17 -O2 -I ./tests/stubs -I . ./tests/motor_identifier_test.cpp -o $env:TEMP/sysid-test/adapter.exe
-& $env:TEMP/sysid-test/adapter.exe
-python ./tests/test_identify.py $env:TEMP/sysid-test
-```
-
-测试中的模拟 J、b 仅存在测试文件中，不参与固件或真实数据的默认拟合。
+安装 numpy/scipy 和 g++ 后运行 python tests/run_tests.py。
+包括原核心逐样本对照、实际 CAN 编码和入队错误、CAN 中断时序、YAML 参数及线程初始化、
+旧/新解码与模拟参数恢复。tests/reference 保存原核心作为对照，不参与固件。

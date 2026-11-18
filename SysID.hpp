@@ -26,6 +26,10 @@ depends:
 // on one 2 ms thread. Instantiation starts the thread; command_ stays zero.
 class SysID : public SysId::MotorIdentifier {
 public:
+  // Route the unmodified motor driver through this bus in YAML.
+  static LibXR::CAN &Observe(LibXR::CAN &physical) {
+    return SysId::CanCommandObserver::Bus(physical);
+  }
   struct Param {
     uint32_t feedback_id = 0;
     float feedback_torque_sign = 1.0f;
@@ -37,12 +41,17 @@ public:
     float min_position = -1000000.0f;
     float max_position = 1000000.0f;
     float max_travel = .06f;
-    float amplitude = .10f;
+    float amplitude = .07f;
     float kp = 2.0f;
     float kd = .12f;
     float torque_limit = .20f;
-    float duration_s = 14.0f;
-    float hold_s = .10f;
+    uint32_t tx_id = 0;
+    uint32_t tx_byte_offset = 0;
+    SysId::CanCommandObserver::Encoding tx_encoding =
+        SysId::CanCommandObserver::Encoding::SIGNED16;
+    float tx_torque_scale = 1.0f;
+    float tx_torque_bias = 0.0f;
+    float torque_constant = 0.0f;
     uint32_t seed = 0xACE1;
     uint32_t task_stack_depth = 2048;
   };
@@ -58,7 +67,15 @@ public:
     const bool IMU_BOUND =
         BindImu(param.gyro_topic_name, param.euler_topic_name, param.gyro_axis,
                 param.gyro_sign, param.pitch_zero);
-    if (!MOTOR_BOUND || !IMU_BOUND || param.task_stack_depth < 1024) {
+    const bool COMMAND_BOUND =
+        ConfigureCommand({.tx_id = param.tx_id,
+                          .byte_offset = param.tx_byte_offset,
+                          .encoding = param.tx_encoding,
+                          .torque_scale = param.tx_torque_scale,
+                          .torque_bias = param.tx_torque_bias},
+                         param.torque_constant);
+    if (!MOTOR_BOUND || !IMU_BOUND || !COMMAND_BOUND ||
+        param.task_stack_depth < 1024) {
       Cancel(Status::BAD_INPUT);
       controlled_motor_.Relax();
       return;
@@ -70,8 +87,6 @@ public:
     kp_ = param.kp;
     kd_ = param.kd;
     torque_limit_ = param.torque_limit;
-    duration_s_ = param.duration_s;
-    hold_s_ = param.hold_s;
     seed_ = param.seed;
     command_ = 0;
     controlled_motor_.Relax();

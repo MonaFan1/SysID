@@ -1,185 +1,146 @@
 #pragma once
 
-// Low-level Poll adapter. XRobot users instantiate SysID.hpp, which owns
-// parameter binding and the control thread.
-
-
+#include "CanCommandObserver.hpp"
 #include "DMMotor.hpp"
+#include "Experiment.hpp"
 #include "ImuFeedback.hpp"
 #include "Motor.hpp"
-#include "MotorSystemID.hpp"
 #include "RMMotor.hpp"
-#include "can.hpp"
 #include "timebase.hpp"
 
 namespace SysId {
-
-// Requires BMI088 gyro + AHRS pitch topics, no Gimbal/CMD dependency or thread.
-// Gyro is used for PRBS PD damping and J/b fitting; encoder position is used
-// for centering/limits. Keep base/big yaw fixed and pitch close to calibrated
-// zero: a gyro body z component is NOT Euler yaw rate at arbitrary pitch.
-// Call Poll()
-// before the normal motor controller; true means this object owns that cycle.
-class MotorIdentifier : public MotorSystem {
- public:
-  MotorIdentifier() : MotorSystem(Defaults()) {}
-  MotorIdentifier(Motor& motor, LibXR::CAN& bus, uint32_t feedback_id,
-                  float feedback_torque_sign = 1.0f)
-      : MotorIdentifier() {
-    Bind(motor, bus, feedback_id, feedback_torque_sign);
-  }
-  // Bind once. CAN is only observed for freshness; the driver decodes feedback.
-  bool Bind(Motor& motor, LibXR::CAN& bus, uint32_t feedback_id,
+// Restored experiment; motor/CAN/IMU adapter remains independent of Gimbal.
+class MotorIdentifier : public Experiment {
+public:
+  bool Bind(Motor &motor, LibXR::CAN &bus, uint32_t feedback_id,
             float feedback_torque_sign = 1.0f) {
-    if (motor_ || feedback_id > 0x7FF ||
+    if (motor_ || feedback_id > 0x7ff ||
         (feedback_torque_sign != 1 && feedback_torque_sign != -1))
       return false;
     motor_ = &motor;
     feedback_torque_sign_ = feedback_torque_sign;
+    observer_ = &CanCommandObserver::Bus(bus);
     auto cb = LibXR::CAN::Callback::Create(
-        [](bool in_isr, MotorIdentifier* self,
-           const LibXR::CAN::ClassicPack& pack) {
-          (void)in_isr;
-          if (pack.dlc != 8) return;
+        [](bool, MotorIdentifier *self, const LibXR::CAN::ClassicPack &pack) {
+          if (pack.dlc != 8)
+            return;
           self->last_rx_us_ =
               static_cast<uint32_t>(LibXR::Timebase::GetMicroseconds());
+          self->rx_count_ = self->rx_count_ + 1;
         },
         this);
     bus.Register(cb, LibXR::CAN::Type::STANDARD,
                  LibXR::CAN::FilterMode::ID_RANGE, feedback_id, feedback_id);
     return true;
   }
-  // 0 stop/idle, 1 PRBS+PD, 2 zero-torque manual calibration.
-  volatile uint32_t command_ = 0;
-  volatile float min_position_ = -1000000.0f;
-  volatile float max_position_ = 1000000.0f;
-  bool Busy() const { return active_ || command_ != 0; }
-  // Axis/sign refer to the BMI088 topic AFTER its configured rotation.
-  // Select the sign so that positive encoder motion gives positive gyro speed.
-  // pitch_zero is the AHRS pitch reading when the yaw and gyro axes align.
-  bool BindImu(const char* gyro_topic, const char* euler_topic,
-               uint32_t axis = 2, float sign = 1.0f, float pitch_zero = 0.0f) {
+  bool ConfigureCommand(const CanCommandObserver::Param &p,
+                        float torque_constant) {
+    if (!observer_ || !observer_->Configure(p) ||
+        !std::isfinite(torque_constant) || torque_constant < 0)
+      return false;
+    command_quantum_ = std::fabs(p.torque_scale);
+    torque_constant_ = torque_constant;
+    return true;
+  }
+  bool BindImu(const char *gyro_topic, const char *euler_topic,
+               uint32_t axis = 2, float sign = 1, float pitch_zero = 0) {
     return imu_.Bind(gyro_topic, euler_topic, axis, sign, pitch_zero);
   }
-  volatile float omega_imu_ = 0, pitch_imu_ = 0;
-
+  // command=1 start, command=0 stop/idle. Instantiation never starts a test.
+  volatile uint32_t command_ = 0;
+  volatile float omega_imu_ = 0, omega_motor_ = 0, pitch_imu_ = 0, theta_ = 0;
+  bool Busy() const { return session_active_ || command_ != 0; }
   bool Poll() {
     const uint64_t NOW = LibXR::Timebase::GetMicroseconds();
-    float dt = last_poll_us_ == 0
-                   ? .002f
-                   : static_cast<float>(NOW - last_poll_us_) * 1e-6f;
+    float dt =
+        last_poll_us_ ? static_cast<float>(NOW - last_poll_us_) * 1e-6f : .002f;
     last_poll_us_ = NOW;
     imu_.Update(NOW);
     omega_imu_ = imu_.omega_;
     pitch_imu_ = imu_.pitch_;
     const uint32_t COMMAND = command_;
-    if (!active_ && COMMAND == 0) return false;
-    if (!motor_) {
-      Cancel(Status::BAD_INPUT);
-      command_ = 0;
-      return true;
-    }
-    if (!active_) {
-      Reset();
-      dt = .002f;  // An idle debugger pause is not a sampling interval.
-      if (COMMAND != 1 && COMMAND != 2) return Finish(Status::INVALID_COMMAND);
-      test_mode_ = COMMAND == 1 ? TestMode::PRBS_PD : TestMode::CALIBRATION;
-      mode_command_ = COMMAND;
-      active_ = true;
-      pitch_started_ = false;
+    if (!session_active_ && COMMAND == 0)
+      return false;
+    if (!motor_ || !observer_)
+      return Finish(BAD_INPUT);
+    if (COMMAND == 0)
+      return Finish(MANUAL_STOP);
+    if (COMMAND != 1)
+      return Finish(INVALID_COMMAND);
+    if (!session_active_) {
+      session_active_ = true;
       start_us_ = NOW;
       last_enable_us_ = 0;
-      min_latched_ = min_position_;
-      max_latched_ = max_position_;
-      if (!std::isfinite(min_latched_) || !std::isfinite(max_latched_) ||
-          min_latched_ >= max_latched_)
-        return Finish(Status::BAD_INPUT);
+      dt = .002f;
+      enable_ = true;
     }
-    if (COMMAND == 0) return Finish(Status::WAITING);
-    if (COMMAND != mode_command_) return Finish(Status::INVALID_COMMAND);
+    const uint32_t RX = rx_count_;
+    const bool MOTOR_NEW = RX != last_rx_count_;
     motor_->Update();
-    const auto& FB = motor_->GetFeedback();
+    last_rx_count_ = RX;
+    const auto &FB = motor_->GetFeedback();
     omega_motor_ = FB.omega;
-    if (COMMAND == 1) {
-      // IMU is mandatory: do not silently fall back to motor speed.
-      if (!imu_.Fresh(NOW)) return Finish(Status::IMU_OFFLINE);
-      if (!std::isfinite(imu_.omega_) || !std::isfinite(imu_.pitch_))
-        return Finish(Status::BAD_INPUT);
-      if (!pitch_started_) {
-        initial_pitch_ = imu_.pitch_;
-        pitch_started_ = true;
-      }
-      if (std::fabs(imu_.pitch_) > .05f ||
-          std::fabs(imu_.pitch_ - initial_pitch_) > .05f)
-        return Finish(Status::PITCH_MOVED);
-      if (std::fabs(imu_.omega_) > 3.0f || !std::isfinite(FB.omega) ||
-          std::fabs(FB.omega) > 3.0f)
-        return Finish(Status::OVERSPEED);
-    }
-    if (!std::isfinite(FB.position) || FB.position <= min_latched_ ||
-        FB.position >= max_latched_)
-      return Finish(Status::POSITION_JUMP);
-    if (!std::isfinite(FB.temp) || FB.temp >= 75)
-      return Finish(Status::OVER_TEMPERATURE);
-    units_confirmed_ =
-        true;  // Driver mapping is configured by the application.
+    if (!imu_.Fresh(NOW))
+      return Finish(IMU_OFFLINE);
     const uint32_t STAMP = last_rx_us_;
-    // A CAN ISR may update STAMP after the earlier loop-start NOW snapshot.
-    // Read the clock AFTER loading STAMP; subtracting it from that older NOW
-    // would wrap and falsely report a fresh frame as more than 50 ms old.
+    // Load clock AFTER stamp: a CAN ISR can run after loop-start NOW.
     const uint32_t CHECK_NOW =
         static_cast<uint32_t>(LibXR::Timebase::GetMicroseconds());
     const bool FRESH =
-        STAMP != 0 && static_cast<uint32_t>(CHECK_NOW - STAMP) <= 50000U;
-    if (status_ == Status::RUNNING &&
-        (!FRESH || (COMMAND == 1 && FB.state != 1)))
-      return Finish(Status::FEEDBACK_LOST);
-    if (COMMAND == 1 && FB.state == 0) {
+        STAMP && static_cast<uint32_t>(CHECK_NOW - STAMP) <= 50000;
+    if (!FRESH || FB.state != 1) {
+      if (Active() || NOW - start_us_ > 5000000)
+        return Finish(MOTOR_OFFLINE);
       if (FRESH && (last_enable_us_ == 0 || NOW - last_enable_us_ >= 200000)) {
         motor_->Enable();
         last_enable_us_ = NOW;
       }
-      if (NOW - start_us_ > 5000000) return Finish(Status::FEEDBACK_LOST);
       return true;
     }
-    const float OUTPUT =
-        Step(FB.position, COMMAND == 1 ? imu_.omega_ : FB.omega,
-             FB.torque * feedback_torque_sign_, dt,
-             FRESH && (COMMAND == 2 || FB.state == 1));
-    if (done_) {
-      active_ = false;
-      command_ = 0;
-      motor_->Relax();
-      return true;
-    }
+    const Input IN{dt,
+                   FB.position,
+                   imu_.omega_,
+                   FB.omega,
+                   FB.torque * feedback_torque_sign_,
+                   imu_.pitch_,
+                   -imu_.gyro_y_,
+                   FB.temp,
+                   true,
+                   true,
+                   MOTOR_NEW,
+                   imu_.gyro_new_};
+    const float OUTPUT = Step(IN);
+    theta_ = FB.position - capture_.header.center;
+    if (done_)
+      return Finish(status_);
+    const uint32_t PREVIOUS = observer_->Count();
     motor_->Control(
         Motor::MotorCmd{.mode = Motor::MODE_TORQUE, .torque = OUTPUT});
+    if (observer_->Count() == PREVIOUS)
+      return Finish(TX_NOT_OBSERVED);
+    if (!observer_->Queued())
+      return Finish(TX_QUEUE_FAILED);
+    // Read the exact torque represented by the driver's submitted frame.
+    CommandQueued(observer_->Torque());
     return true;
   }
 
- private:
-  static Param Defaults() {
-    Param p;
-    p.torque_limit = .2f;
-    p.speed_limit = 3.0f;
-    return p;
-  }
+private:
   bool Finish(Status reason) {
     Cancel(reason);
     command_ = 0;
-    active_ = false;
-    if (motor_) motor_->Relax();
+    session_active_ = false;
+    if (motor_)
+      motor_->Relax();
     return true;
   }
-  Motor* motor_ = nullptr;
+  Motor *motor_ = nullptr;
+  CanCommandObserver *observer_ = nullptr;
   ImuFeedback imu_;
-  bool pitch_started_ = false;
-  float initial_pitch_ = 0;
-  volatile uint32_t last_rx_us_ = 0;
-  float feedback_torque_sign_ = 1.0f;
-  bool active_ = false;
-  uint32_t mode_command_ = 0;
+  float feedback_torque_sign_ = 1;
+  bool session_active_ = false;
+  volatile uint32_t last_rx_us_ = 0, rx_count_ = 0;
+  uint32_t last_rx_count_ = 0;
   uint64_t last_poll_us_ = 0, start_us_ = 0, last_enable_us_ = 0;
-  float min_latched_ = 0, max_latched_ = 0;
 };
-}  // namespace SysId
+} // namespace SysId

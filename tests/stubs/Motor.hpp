@@ -1,10 +1,10 @@
 #pragma once
 #include <cstdint>
 namespace LibXR {
-enum class ErrorCode { OK };
+enum class ErrorCode { OK, FAILED, NOT_SUPPORT };
 }
 class Motor {
- public:
+public:
   enum ControlMode { MODE_TORQUE };
   struct MotorCmd {
     ControlMode mode;
@@ -16,8 +16,8 @@ class Motor {
   };
   virtual ~Motor() = default;
   virtual LibXR::ErrorCode Update() = 0;
-  virtual const Feedback& GetFeedback() = 0;
-  virtual void Control(const MotorCmd&) = 0;
+  virtual const Feedback &GetFeedback() = 0;
+  virtual void Control(const MotorCmd &) = 0;
   virtual void Enable() = 0;
   virtual void Relax() = 0;
 };

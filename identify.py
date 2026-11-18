@@ -1,4 +1,4 @@
-"""Decode an IMU-based MotorIdentifier PRBS dump (hex Size C008).
+"""Decode an IMU-based MotorIdentifier PRBS dump (restored hex Size 12080).
 
 Optional --fit estimates local J,b with Coulomb, stiffness and offset nuisance
 terms. Results are candidates: a second capture with a new seed is validation.
@@ -12,10 +12,10 @@ import struct
 SAMPLE = struct.Struct('<6fII')
 CAPACITY = 1536
 DUMP_BYTES = 0xC008
-COLUMNS = ['time_s','position_relative_rad','omega_imu_rad_s','omega_motor_rad_s',
+COLUMNS = ['time_s','position_rad','omega_imu_rad_s','omega_motor_rad_s',
            'torque_cmd_mean_nm','torque_feedback_mean_nm','stage','flags']
 
-def decode(raw):
+def decode_legacy32(raw):
     import math
     if len(raw) != DUMP_BYTES:
         raise ValueError('Export &g_sysid.buf_[0], hexadecimal Size C008 (49160 bytes).')
@@ -34,6 +34,27 @@ def decode(raw):
                      excite_s=max(exciting)-1. if exciting else 0.,status=None,
                      status_text='completion not stored; check Ozone status_ = 2',count=count,
                      velocity_source='signed IMU gyro axis; motor speed recorded for comparison',format_version='imu32-prbs')
+
+
+def decode(raw):
+    import math
+    if len(raw)==0xC008:
+        return decode_legacy32(raw)
+    if len(raw)!=0x12080:
+        raise ValueError('Restored capture: export &g_sysid.capture_, hex Size 12080 (73856 bytes).')
+    magic,version,size,capacity,count,status,seed,reserved=struct.unpack_from('<8I',raw)
+    if (magic,version,size,capacity)!=(0x59534944,2,48,1536):
+        raise ValueError('Wrong restored capture header/address/firmware.')
+    if status in (0,1) or not 2<=count<=1536:
+        raise ValueError('Capture is still running or contains too few samples.')
+    names=['center','min_position','max_position','amplitude','kp','kd','torque_limit','max_travel','settle_s','excite_s','return_s','log_period_s','hold_fast_s','hold_mid_s','hold_slow_s','torque_constant','command_quantum']
+    meta=dict(zip(names,struct.unpack_from('<17f',raw,32)))
+    meta.update(status=status,status_text='done' if status==2 else 'stopped status '+str(status),count=count,seed=seed,format_version='restored-v2')
+    rows=[struct.unpack_from('<10f2I',raw,128+48*i) for i in range(count)]
+    if rows[0][0]!=0:raise ValueError('Initial sample missing.')
+    for i,r in enumerate(rows):
+        if not all(math.isfinite(v) for v in r[:10]) or r[10]>4 or r[11]&~7 or (i and r[0]<=rows[i-1][0]):raise ValueError('Corrupt restored sample.')
+    return rows,meta
 
 
 def fit_candidates(rows, metadata, fixed_j=None):

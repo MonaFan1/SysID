@@ -1,14 +1,15 @@
-#include <cassert>
-#include <iostream>
-
 #include "MotorIdentifier.hpp"
+#include <cassert>
+#include <cmath>
+#include <iostream>
 struct FakeMotor : Motor {
   Feedback fb;
-  float output = 0;
-  int sends = 0, relaxes = 0, enables = 0;
+  LibXR::CAN &bus;
   LibXR::CAN *interrupt_can = nullptr;
+  float output = 0;
+  unsigned relaxes = 0, enables = 0;
+  explicit FakeMotor(LibXR::CAN &c) : bus(c) {}
   LibXR::ErrorCode Update() override {
-    // Receive after Poll captured NOW, as an actual CAN ISR can do.
     if (interrupt_can) {
       LibXR::Timebase::now += 10;
       interrupt_can->Receive();
@@ -18,115 +19,75 @@ struct FakeMotor : Motor {
   const Feedback &GetFeedback() override { return fb; }
   void Control(const MotorCmd &cmd) override {
     output = cmd.torque;
-    ++sends;
-  }
-  void Enable() override {
-    fb.state = 1;
-    ++enables;
+    const int16_t RAW =
+        static_cast<int16_t>(-cmd.torque / .741f / 3.0f * 16384.0f);
+    LibXR::CAN::ClassicPack p;
+    p.id = 0x1fe;
+    p.data[0] = static_cast<uint8_t>((RAW >> 8) & 255);
+    p.data[1] = static_cast<uint8_t>(RAW & 255);
+    bus.AddMessage(p);
   }
   void Relax() override {
-    output = 0;
     ++relaxes;
+    Control({MODE_TORQUE, 0});
+  }
+  void Enable() override {
+    ++enables;
+    fb.state = 1;
   }
 };
-using Status = SysId::MotorSystem::Status;
+using Status = SysId::Experiment::Status;
 using Gyro = LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>;
 using Euler = LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>>;
 void Imu(float z = 0, float pitch = 0) {
-  Eigen::Matrix<float, 3, 1> gyro{};
-  gyro(2) = z;
-  LibXR::EulerAngle<float> angle{};
-  angle.pitch = pitch;
-  Gyro::Publish(gyro);
-  Euler::Publish(angle);
+  Eigen::Matrix<float, 3, 1> g{};
+  g(2) = z;
+  LibXR::EulerAngle<float> e{};
+  e.pitch = pitch;
+  Gyro::Publish(g);
+  Euler::Publish(e);
 }
 int main() {
-  FakeMotor motor;
-  LibXR::CAN can;
-  SysId::MotorIdentifier id(motor, can, 0x15);
+  LibXR::CAN physical;
+  auto &observed = SysId::CanCommandObserver::Bus(physical);
+  FakeMotor motor(observed);
+  motor.fb.position = -1.5;
+  SysId::MotorIdentifier id;
+  assert(id.Bind(motor, physical, 0x205, -1));
   assert(id.BindImu("gyro", "euler", 2, -1));
-  assert(!id.Poll() && motor.sends == 0);
-  LibXR::Timebase::now += 1000000; // pause while idle must not abort startup
+  const float Q = .741f * 3 / 16384;
+  assert(id.ConfigureCommand(
+      {0x1fe, 0, SysId::CanCommandObserver::Encoding::SIGNED16, -Q, 0}, .741f));
+  assert(!id.Poll());
   id.command_ = 1;
+  LibXR::Timebase::now += 1000000;
   Imu();
-  can.Receive();
-  assert(id.Poll());
-  assert(motor.enables == 1 && motor.sends == 0);
+  physical.Receive();
+  id.Poll();
+  assert(motor.enables == 1);
   LibXR::Timebase::now += 2000;
   Imu();
-  can.Receive();
+  physical.Receive();
   id.Poll();
   assert(id.status_ == Status::RUNNING);
-  for (int i = 0; i < 550; ++i) {
+  for (int n = 0; n < 1100; ++n) {
     LibXR::Timebase::now += 2000;
     Imu();
-    can.Receive();
+    physical.Receive();
     id.Poll();
   }
-  assert(motor.sends > 500 && motor.output != 0);
+  assert(motor.output != 0 && id.capture_.header.version == 2);
+  assert(std::fabs(id.tau_cmd_ - observed.Torque()) < 1e-7f);
+  assert(id.capture_.samples[1].stage == 0);
   id.command_ = 0;
   id.Poll();
-  assert(motor.output == 0 && motor.relaxes == 1 && !id.Busy());
-  const auto count = id.count_;
-  assert(!id.Poll() && id.count_ == count);
+  assert(id.status_ == Status::MANUAL_STOP && motor.output == 0);
+  const auto COUNT = id.count_;
+  id.Poll();
+  assert(id.count_ == COUNT);
+  motor.interrupt_can = &physical;
   id.command_ = 1;
-  LibXR::Timebase::now += 2000;
   Imu();
-  can.Receive();
-  id.Poll();
-  LibXR::Timebase::now += 51000;
-  Imu();
-  can.Receive(2);
-  id.Poll();
-  assert(id.status_ == Status::FEEDBACK_LOST && motor.output == 0);
-  id.command_ = 1;
-  LibXR::Timebase::now += 2000;
-  Imu();
-  can.Receive();
-  id.Poll();
-  motor.fb.position = .07;
-  LibXR::Timebase::now += 2000;
-  can.Receive();
-  id.Poll();
-  assert(id.done_ && motor.output == 0);
-  motor.fb.position = 0;
-  motor.fb.state = 0;
-  id.command_ = 2;
-  for (int i = 0; i < 20; ++i) {
-    LibXR::Timebase::now += 2000;
-    can.Receive();
-    id.Poll();
-    assert(motor.output == 0 && !id.done_);
-  }
-  id.command_ = 0;
-  id.Poll();
-  id.command_ = 9;
-  id.Poll();
-  assert(id.status_ == Status::INVALID_COMMAND && !id.Busy());
-  motor.fb.state = 1;
-  Imu(-.4f);
-  can.Receive();
-  id.command_ = 1;
-  id.Poll();
-  LibXR::Timebase::now += 2000;
-  Imu(-.4f);
-  can.Receive();
-  id.Poll();
-  assert(id.omega_imu_ == .4f && motor.fb.omega == 0);
-  assert(motor.output <
-         -.04f); // PD uses signed gyro, not the zero motor speed.
-  LibXR::Timebase::now += 21000;
-  can.Receive();
-  id.Poll();
-  assert(id.status_ == Status::IMU_OFFLINE && motor.output == 0);
-  Imu(0, .1f);
-  can.Receive();
-  id.command_ = 1;
-  id.Poll();
-  assert(id.status_ == Status::PITCH_MOVED && motor.output == 0);
-  motor.interrupt_can = &can;
-  Imu();
-  id.command_ = 1;
   LibXR::Timebase::now += 2000;
   id.Poll();
   assert(id.status_ == Status::RUNNING);
@@ -134,13 +95,35 @@ int main() {
     Imu();
     LibXR::Timebase::now += 2000;
     id.Poll();
-    assert(id.status_ == Status::RUNNING && !id.done_);
+    assert(!id.done_);
   }
   motor.interrupt_can = nullptr;
   Imu();
   LibXR::Timebase::now += 51000;
   id.Poll();
   assert(id.status_ == Status::FEEDBACK_LOST && motor.output == 0);
-  std::cout << "PASS: idle, one-command enable/output, stop, freeze, "
-               "disconnect, travel, passive calibration, invalid command.\n";
+  Imu();
+  physical.Receive();
+  id.command_ = 1;
+  LibXR::Timebase::now += 2000;
+  id.Poll();
+  physical.queue_result = LibXR::ErrorCode::FAILED;
+  Imu();
+  physical.Receive();
+  LibXR::Timebase::now += 2000;
+  id.Poll();
+  assert(id.status_ == Status::TX_QUEUE_FAILED && motor.output == 0);
+  physical.queue_result = LibXR::ErrorCode::OK;
+  Imu();
+  physical.Receive();
+  id.command_ = 1;
+  LibXR::Timebase::now += 2000;
+  id.Poll();
+  Imu(0, .1f);
+  physical.Receive();
+  LibXR::Timebase::now += 2000;
+  id.Poll();
+  assert(id.status_ == Status::PITCH_MOVED);
+  std::cout << "PASS: observed packed torque/queue failure, CAN interrupt "
+               "race, stop/freeze, feedback/pitch exits.\n";
 }

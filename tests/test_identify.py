@@ -24,3 +24,10 @@ for bad in (raw[:-1],bytes(old_motor),(folder/'calibration_ok.bin').read_bytes()
     except ValueError: pass
     else: raise AssertionError('Wrong layout/mode was accepted')
 print('PASS: decoder, free/fixed J fits, synthetic b recovery, rejected wrong format/mode.')
+
+restored_rows,restored_meta=decode((folder/'restored.bin').read_bytes())
+assert restored_meta['status']==2 and restored_meta['format_version']=='restored-v2'
+assert restored_meta['settle_s']==2 and restored_meta['excite_s']==12 and restored_meta['return_s']==1
+assert restored_rows[-1][0]>=15 and {int(r[10]) for r in restored_rows}=={0,1,2,3,4}
+assert restored_meta['amplitude']>0.069 and len(restored_rows)>1200
+print('PASS: restored header/status/parameters and 15-second stage capture decoding.')

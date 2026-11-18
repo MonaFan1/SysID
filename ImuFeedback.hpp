@@ -12,8 +12,8 @@ namespace SysId {
 // Bind. Subscribe independently of Gimbal: this module never depends on Gimbal
 // state.
 class ImuFeedback {
- public:
-  bool Bind(const char* gyro_topic, const char* euler_topic, uint32_t axis = 2,
+public:
+  bool Bind(const char *gyro_topic, const char *euler_topic, uint32_t axis = 2,
             float sign = 1.0f, float pitch_zero = 0.0f) {
     if (gyro_ || !gyro_topic || !euler_topic || axis > 2 ||
         (sign != 1 && sign != -1) || !std::isfinite(pitch_zero))
@@ -28,9 +28,14 @@ class ImuFeedback {
     return true;
   }
   void Update(uint64_t now) {
-    if (!gyro_) return;
+    gyro_new_ = false;
+    if (!gyro_)
+      return;
     if (gyro_->Available()) {
-      omega_ = sign_ * gyro_->GetData()(axis_);
+      const auto DATA = gyro_->GetData();
+      omega_ = sign_ * DATA(axis_);
+      gyro_y_ = DATA(1);
+      gyro_new_ = true;
       gyro_stamp_ = now;
       gyro_->StartWaiting();
     }
@@ -46,17 +51,18 @@ class ImuFeedback {
     return gyro_stamp_ && euler_stamp_ && now - gyro_stamp_ <= 20000 &&
            now - euler_stamp_ <= 50000;
   }
-  float omega_ = 0, pitch_ = 0;
+  float omega_ = 0, pitch_ = 0, gyro_y_ = 0;
+  bool gyro_new_ = false;
 
- private:
+private:
   using GyroSubscriber =
       LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>;
   using EulerSubscriber =
       LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>>;
-  GyroSubscriber* gyro_ = nullptr;
-  EulerSubscriber* euler_ = nullptr;
+  GyroSubscriber *gyro_ = nullptr;
+  EulerSubscriber *euler_ = nullptr;
   uint32_t axis_ = 2;
   float sign_ = 1, pitch_zero_ = 0;
   uint64_t gyro_stamp_ = 0, euler_stamp_ = 0;
 };
-}  // namespace SysId
+} // namespace SysId

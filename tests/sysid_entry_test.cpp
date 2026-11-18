@@ -20,6 +20,8 @@ int main() {
   p.min_position = -2;
   p.max_position = -1;
   p.amplitude = .08f;
+  p.tx_id = 0x1fe;
+  p.tx_torque_scale = -.741f * 3 / 16384;
   p.kp = 3;
   p.seed = 123;
   SysID entry(motor, can, p);
@@ -32,7 +34,7 @@ int main() {
   p.feedback_id = 0x800;
   SysID invalid(motor, can, p);
   assert(!invalid.ready_ && LibXR::Thread::created == 1);
-  assert(invalid.status_ == SysId::MotorSystem::Status::BAD_INPUT);
+  assert(invalid.status_ == SysId::Experiment::Status::BAD_INPUT);
   std::cout << "PASS: YAML entry parameters, automatic thread creation, idle "
                "default, bad binding.\n";
 }
