@@ -1,0 +1,95 @@
+{
+  "model": "tau = J*domega/dt + b*omega + fc*sign(omega) + k*q + offset",
+  "state": "small relative joint; fixed big yaw/base and fixed pitch=0",
+  "velocity_source": "-gyro.z; 60 ms endpoint smoothing",
+  "fits": {
+    "feedback": [
+      {
+        "window_s": 0.04,
+        "available": true,
+        "windows": 138,
+        "J_kg_m2": 0.0032373898311769474,
+        "b_nm_s_rad": 0.10185054739578998,
+        "coulomb_nuisance_nm": 0.0234310332158876,
+        "stiffness_nuisance_nm_rad": 1.316716485424947,
+        "offset_nm": 0.03437556851286148,
+        "scaled_condition": 7.249691393197377,
+        "integrated_torque_rmse_nm_s": 0.0006231221111428738,
+        "last_stage_validation_rmse_nm_s": 0.0007463493001488458,
+        "parameter_at_bound": false
+      },
+      {
+        "window_s": 0.08,
+        "available": true,
+        "windows": 50,
+        "J_kg_m2": 0.0028824191568053302,
+        "b_nm_s_rad": 0.015778084976116224,
+        "coulomb_nuisance_nm": 0.0433799802577869,
+        "stiffness_nuisance_nm_rad": 0.5914377152396395,
+        "offset_nm": 0.02597121399369261,
+        "scaled_condition": 13.082985548095966,
+        "integrated_torque_rmse_nm_s": 0.0005842227173376413,
+        "last_stage_validation_rmse_nm_s": 0.0006434049251654086,
+        "parameter_at_bound": false
+      },
+      {
+        "window_s": 0.16,
+        "available": false,
+        "reason": "Too few moving windows (sticking/early stop).",
+        "windows": 5
+      }
+    ],
+    "command": [
+      {
+        "window_s": 0.04,
+        "available": true,
+        "windows": 138,
+        "J_kg_m2": 0.005746306456853607,
+        "b_nm_s_rad": 0.07125529457712396,
+        "coulomb_nuisance_nm": 0.024295533326191204,
+        "stiffness_nuisance_nm_rad": 1.015502662627683,
+        "offset_nm": 0.03157449036523666,
+        "scaled_condition": 7.249691393197377,
+        "integrated_torque_rmse_nm_s": 0.0009096315274941561,
+        "last_stage_validation_rmse_nm_s": 0.0010225378104870486,
+        "parameter_at_bound": false
+      },
+      {
+        "window_s": 0.08,
+        "available": true,
+        "windows": 50,
+        "J_kg_m2": 0.005505764873850784,
+        "b_nm_s_rad": 9.840029325079446e-08,
+        "coulomb_nuisance_nm": 0.04471550530028238,
+        "stiffness_nuisance_nm_rad": 0.22867857087408364,
+        "offset_nm": 0.02291605502738113,
+        "scaled_condition": 13.082985548095966,
+        "integrated_torque_rmse_nm_s": 0.0008890169265534356,
+        "last_stage_validation_rmse_nm_s": 0.0009927784939339252,
+        "parameter_at_bound": true
+      },
+      {
+        "window_s": 0.16,
+        "available": false,
+        "reason": "Too few moving windows (sticking/early stop).",
+        "windows": 5
+      }
+    ]
+  },
+  "warnings": [
+    "Candidates only; validate with another seed/capture.",
+    "Feedback torque is current-derived using configured Kt, not a torque sensor.",
+    "Sensor and actuator transport delays are not independently calibrated.",
+    "If b changes substantially with window/input, it is not yet identified."
+  ],
+  "quality": {
+    "duration_s": 15.001607894897461,
+    "sample_interval_median_s": 0.010000467300415039,
+    "position_range_rad": [
+      -2.0225536823272705,
+      -1.9995440244674683
+    ],
+    "moving_fraction": 0.36545079146593257,
+    "velocity_correlation": 0.5157932665779194
+  }
+}

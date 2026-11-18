@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: IMU 电机闭环系统辨识，YAML 实例化并自动运行采集线程 / IMU motor identification with an automatic capture thread
+module_description: 通过闭环实验估计电机机构惯量、粘性阻尼和库仑摩擦，为云台 LQR、前馈和仿真提供参数依据 / Closed-loop identification of inertia, viscous damping and Coulomb friction for gimbal modeling
 standalone: true
 depends:
 - id: QDU-Robomaster/Motor

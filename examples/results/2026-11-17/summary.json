@@ -1,0 +1,25 @@
+{
+  "date": "2026-11-17",
+  "platform": "Double Yaw small GM6020 yaw; big yaw/base/pitch fixed",
+  "mechanical_reference_inertia_kg_m2": 0.00546,
+  "best_inertia_candidate": {
+    "report": "yaw_actual_run1.fit.json",
+    "input": "command",
+    "window_s": 0.08,
+    "J_kg_m2": 0.005505764873850784,
+    "relative_difference_percent": 0.8381845027616207,
+    "joint_parameter_at_bound": true,
+    "qualification": "Single historical candidate selected for inertia agreement; b reaches its lower bound. Not a general accuracy specification."
+  },
+  "joint_parameter_candidate": {
+    "report": "yaw_actual_run3.fit.json",
+    "input": "feedback",
+    "window_s": 0.08,
+    "J_kg_m2": 0.005135773321736599,
+    "b_nm_s_rad": 0.06796350516440434,
+    "fc_nm": 0.031538317481711986,
+    "joint_parameter_at_bound": false,
+    "qualification": "Candidate without parameter bounds active; b and fc have no independent ground-truth comparison."
+  },
+  "provenance": "Archived Double Yaw v1 fit/metadata reports. Raw captures and raw CSV are not included in this documentation update."
+}
