@@ -16,6 +16,7 @@ with tempfile.TemporaryDirectory(prefix='sysid-test-') as folder:
     for name, source, extra in (
         ('core', 'motor_sysid_test.cpp', []),
         ('adapter', 'motor_identifier_test.cpp', ['-I', str(root/'tests/stubs')]),
+        ('entry', 'sysid_entry_test.cpp', ['-I', str(root/'tests/stubs')]),
     ):
         binary = output/(name + ('.exe' if os.name == 'nt' else ''))
         subprocess.run([compiler, '-std=c++17', '-O2', '-Wall', '-Wextra',

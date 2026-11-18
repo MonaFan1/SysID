@@ -1,22 +1,8 @@
 #pragma once
 
-// clang-format off
-/* === MODULE MANIFEST V2 ===
-module_description: 电机闭环系统辨识采集 / Motor closed-loop identification capture
-standalone: false
-depends:
-- id: QDU-Robomaster/Motor
-  ref: same-or-dev
-- id: QDU-Robomaster/RMMotor
-  ref: same-or-dev
-- id: QDU-Robomaster/DMMotor
-  ref: same-or-dev
-- id: xrobot-org/BMI088
-  ref: same-or-dev
-- id: xrobot-org/MadgwickAHRS
-  ref: same-or-dev
-=== END MANIFEST === */
-// clang-format on
+// Low-level Poll adapter. XRobot users instantiate SysID.hpp, which owns
+// parameter binding and the control thread.
+
 
 #include "DMMotor.hpp"
 #include "ImuFeedback.hpp"

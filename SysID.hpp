@@ -1,0 +1,97 @@
+#pragma once
+
+// clang-format off
+/* === MODULE MANIFEST V2 ===
+module_description: IMU 电机闭环系统辨识，YAML 实例化并自动运行采集线程 / IMU motor identification with an automatic capture thread
+standalone: true
+depends:
+- id: QDU-Robomaster/Motor
+  ref: same-or-dev
+- id: QDU-Robomaster/RMMotor
+  ref: same-or-dev
+- id: QDU-Robomaster/DMMotor
+  ref: same-or-dev
+- id: xrobot-org/BMI088
+  ref: same-or-dev
+- id: xrobot-org/MadgwickAHRS
+  ref: same-or-dev
+=== END MANIFEST === */
+// clang-format on
+
+#include "MotorIdentifier.hpp"
+#include "thread.hpp"
+
+// Instantiate motor, BMI088 and AHRS BEFORE this module in YAML.
+// The motor belongs exclusively to this instance. Owns Update/Control/Relax
+// on one 2 ms thread. Instantiation starts the thread; command_ stays zero.
+class SysID : public SysId::MotorIdentifier {
+public:
+  struct Param {
+    uint32_t feedback_id = 0;
+    float feedback_torque_sign = 1.0f;
+    const char *gyro_topic_name = "bmi088_gyro";
+    const char *euler_topic_name = "ahrs_euler";
+    uint32_t gyro_axis = 2;
+    float gyro_sign = 1.0f;
+    float pitch_zero = 0.0f;
+    float min_position = -1000000.0f;
+    float max_position = 1000000.0f;
+    float max_travel = .06f;
+    float amplitude = .10f;
+    float kp = 2.0f;
+    float kd = .12f;
+    float torque_limit = .20f;
+    float duration_s = 14.0f;
+    float hold_s = .10f;
+    uint32_t seed = 0xACE1;
+    uint32_t task_stack_depth = 2048;
+  };
+
+  // motor/can_bus refer to an existing motor and its actual CAN bus.
+  // Topics: Eigen::Matrix<float,3,1> in rad/s and EulerAngle<float> in rad.
+  // Axis/sign apply AFTER mounting rotation. Fix base/big yaw and pitch near
+  // calibrated zero: an arbitrary body-axis gyro component is not yaw rate.
+  SysID(Motor &motor, LibXR::CAN &can_bus, const Param &param)
+      : controlled_motor_(motor) {
+    const bool MOTOR_BOUND =
+        Bind(motor, can_bus, param.feedback_id, param.feedback_torque_sign);
+    const bool IMU_BOUND =
+        BindImu(param.gyro_topic_name, param.euler_topic_name, param.gyro_axis,
+                param.gyro_sign, param.pitch_zero);
+    if (!MOTOR_BOUND || !IMU_BOUND || param.task_stack_depth < 1024) {
+      Cancel(Status::BAD_INPUT);
+      controlled_motor_.Relax();
+      return;
+    }
+    min_position_ = param.min_position;
+    max_position_ = param.max_position;
+    max_travel_ = param.max_travel;
+    amplitude_ = param.amplitude;
+    kp_ = param.kp;
+    kd_ = param.kd;
+    torque_limit_ = param.torque_limit;
+    duration_s_ = param.duration_s;
+    hold_s_ = param.hold_s;
+    seed_ = param.seed;
+    command_ = 0;
+    controlled_motor_.Relax();
+    ready_ = true;
+    thread_.Create(this, ThreadFunc, "sysid", param.task_stack_depth,
+                   LibXR::Thread::Priority::HIGH);
+  }
+
+  volatile bool ready_ = false;
+
+private:
+  static void ThreadFunc(SysID *self) {
+    for (;;) {
+      if (!self->Poll()) {
+        self->controlled_motor_.Update();
+        self->controlled_motor_.Relax();
+      }
+      LibXR::Thread::Sleep(2);
+    }
+  }
+  Motor &controlled_motor_;
+  LibXR::Thread thread_;
+};

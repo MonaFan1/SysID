@@ -2,35 +2,42 @@
 
 基于 Motor 接口的单轴闭环系统辨识：四电平伪随机力矩＋弱 PD 回中，在 Ozone 修改一个命令启动。记录后通过积分最小二乘估计转动惯量 J、粘性阻尼 b；不预设任何机器的 J、零点或机械限位。
 
-## 接入
+## 按 XRobot 流程接入（1.0.1）
 
-依赖 QDU-Robomaster 的 Motor、RMMotor、DMMotor 和 LibXR。公开版驱动需要相应版本的 LibXR（包含 latest_snapshot.hpp）。SystemID 依赖 BMI088 的角速度话题，以及 MadgwickAHRS 的 Euler pitch 话题。它不依赖 Gimbal、CMD 或遥控器，不要求扩展 Motor 接口。manifest 的 depends 已加入 xrobot-org/BMI088、xrobot-org/MadgwickAHRS；depends 负责拉取模块，仍需在应用配置中先实例化 IMU 和 AHRS、发布匹配的话题。
+模块入口是 `SysID.hpp` 中的 `class SysID`，manifest 为 `standalone: true`。
+在 YAML 实例化后，`xrobot setup` / `xrobot gen` 自动生成电机、IMU、AHRS 和辨识器的构造代码；SysID 自己创建 2 ms 控制线程。无需手写 app_main 调用、Poll 循环或单独的启动头文件。
 
-```cpp
-#include "MotorIdentifier.hpp"
-inline SysId::MotorIdentifier g_sysid;
+1. 在 `Modules/sources.yaml` 的 sources 列表增加：
 
-// 初始化时绑定一次已有的 Motor 和所在 CAN：
-// bool bound = g_sysid.Bind(motor, can, feedback_id);
-// bool imu_bound = g_sysid.BindImu("bmi088_gyro", "ahrs_euler", 2, -1.0f);
-// 检查 bound 和 imu_bound；不要把带副作用的绑定仅写在 ASSERT 内。
-// feedback_id 是回传帧 ID，不是控制 ID。
-
-// 原有电机控制循环中（推荐 2 ms）：
-// if (!g_sysid.Poll()) {
-//   原有的该电机反馈更新及控制逻辑;
-// }
+```yaml
+- url: https://raw.githubusercontent.com/MonaFan1/SysID/main/index.yaml
+  priority: 0
 ```
 
-这是库型模块，不自动创建电机或线程。对象必须保持静态生命周期，CAN 回调注册后不能销毁对象。Poll 返回 true 时，原有代码应跳过被测电机的 Update/Enable/Relax/Control，其他电机继续控制。RMMotor 同组电机仍须参与驱动拼包，否则可能不发帧。
+2. 在 `Modules/modules.yaml` 的 modules 列表增加 `MonaFan1/SysID@main`。入口 manifest 的 depends 自动拉取 Motor、RMMotor、DMMotor、BMI088、MadgwickAHRS。
+3. 完整应用配置参考 [examples/small_yaw.yaml](examples/small_yaw.yaml)：先实例化 BMI088、AHRS 和电机，再配置 SysID，motor 引用前面已经创建的电机，can_bus 使用该电机的实际 CAN。复制示例到 BSP 的 User/xrobot.yaml 后执行：
 
-绑定时使用项目中已有的电机对象、CAN 总线和实际反馈 ID。位置使用电机编码器，PD 和拟合速度使用 IMU，电机角速度另外记录以作对照。角度、角速度、力矩必须对应同一个机械自由度，单位 rad、rad/s、N·m。DM 解码量程应与内部配置一致。带额外传动时需先统一轴端单位。辨识期间固定底座、大 yaw 和 pitch。IMU 在 pitch 框架上时，仅在 pitch 接近校准零位、安装轴与 yaw 对齐且 roll 固定的条件下使用所选 gyro 分量；不自动将它当作任意姿态下的 Euler yaw 导数。结果是该单轴条件下的等效参数，不是大小 yaw 联合模型。
+```powershell
+xrobot setup
+xrobot format
+xrobot gen -c User/xrobot.yaml
+cmake --preset debug
+cmake --build --preset debug
+```
 
-公开版 DM 已翻转反向配置的反馈力矩，绑定默认符号 +1。当前公开版 RM 的反向配置未翻转反馈力矩：当 RMMotor reverse=true 时，绑定第四参数应传 -1.0f，统一到位置正方向。
+SysID 的参数均通过构造参数 `param` 配置，示例包含 CAN 反馈 ID、力矩反馈符号、IMU 话题、gyro 分量/符号、pitch 零位、位置边界、激励/PD/采集参数及线程栈大小。示例里的 GM6020、CAN1、0x205、方向和限位只适用于该示例机器，移植时按实物配置，不是模块默认机器参数。模块不写入固定惯量。
+
+**电机独占**：这个 YAML 入口持续负责绑定电机的 Update/Control/Relax，空闲发送零输出。不能同时让 Gimbal 等其他控制器使用同一电机。RMMotor 同组其他电机仍须参与各自的驱动拼包。该对象及其硬件依赖保持静态生命周期。
+
+位置使用电机编码器，PD 与拟合速度使用有符号的 IMU 分量，电机速度另外记录对照。统一单位 rad、rad/s、N·m；固定底座、大 yaw 和 pitch，pitch 接近校准零位，安装轴对齐且 roll 固定。任意姿态下的 gyro.z 不等于 Euler yaw 的导数。结果是这些机械条件下的单轴等效参数。
+
+公开版 DM 已对反向配置的反馈力矩取反，feedback_torque_sign 通常 +1；当前公开版 RM 未翻转反向配置的反馈力矩，reverse=true 时设为 -1。实际 gyro 分量/符号指 IMU rotation 之后的坐标，应满足编码器 position 增大时使用的角速度为正。
+
+低层 `MotorIdentifier.hpp` 保留手动 Bind/Poll 接口，供已有控制循环的高级集成使用；常规 XRobot 用户使用上面的 SysID 入口。
 
 ## Ozone 启动与参数
 
-上电空闲，不自动开始。先固定底座/大 yaw，并将 pitch 保持在校准零位、yaw 放在有活动余量的位置，再改参数，最后将 command_ 改为 1。参数在启动时锁存，中途修改下次才生效。
+YAML 实例 id 建议为 g_sysid。调试器若无法直接按短名称找到它，可在生成的 XRobotMain 中查看同名静态对象。上电线程自动启动，ready_=true 表示绑定完成；实验仍空闲，不自动开始。先固定底座/大 yaw，并将 pitch 保持在校准零位、yaw 放在有活动余量的位置，再改参数，最后将 command_ 改为 1。参数在启动时锁存，中途修改下次才生效。
 
 | Watch 变量（前缀 g_sysid.） | 默认 | 含义 |
 | --- | --- | --- |
@@ -55,9 +62,9 @@ theta_ 是相对起点位置；omega_ 是位置窗口斜率诊断值。PD 和新
 
 ### IMU 接线与配置说明
 
-BindImu 的参数依次是 gyro 话题、Euler 话题、gyro 分量索引（0=x、1=y、2=z）、方向符号、pitch 零位偏置（默认 0 rad）。分量指 BMI088 发布话题已经执行 rotation 变换之后的坐标，不能把安装变换重复做一遍。上面的示例选择 -gyro.z()；实际机构必须验证正方向：编码器 position 增大时，omega_imu_ 也应为正。
+YAML 参数 gyro_topic_name、euler_topic_name、gyro_axis（0=x、1=y、2=z）、gyro_sign、pitch_zero 分别指定话题、分量、方向和 pitch 零位。分量指 BMI088 发布话题已经执行 rotation 变换之后的坐标，不能把安装变换重复做一遍。上面的示例选择 -gyro.z()；实际机构必须验证正方向：编码器 position 增大时，omega_imu_ 也应为正。
 
-gyro 话题类型是 Eigen::Matrix<float,3,1>、单位 rad/s；Euler 是 LibXR::EulerAngle<float>、单位 rad。ImuFeedback 在 Poll 内自己取话题，不用 Gimbal 转发。gyro 超过 20 ms、Euler 超过 50 ms 未更新就退出，且不会回退到电机速度。这里的新鲜度按本模块读取新话题的时刻计算，不是传感器硬件采样时间。pitch 相对 BindImu 指定零位必须在 ±0.05 rad，运行中变化也不能超过 0.05 rad。
+gyro 话题类型是 Eigen::Matrix<float,3,1>、单位 rad/s；Euler 是 LibXR::EulerAngle<float>、单位 rad。ImuFeedback 在 Poll 内自己取话题，不用 Gimbal 转发。gyro 超过 20 ms、Euler 超过 50 ms 未更新就退出，且不会回退到电机速度。这里的新鲜度按本模块读取新话题的时刻计算，不是传感器硬件采样时间。pitch 相对 pitch_zero 指定零位必须在 ±0.05 rad，运行中变化也不能超过 0.05 rad。
 
 BMI088/AHRS 依赖只负责数据提供；使用其他 IMU 时，可以提供相同类型和单位的话题，按实际提供者调整 manifest。零力矩手动刻度检查 command_=2 不要求 IMU。
 
@@ -82,6 +89,7 @@ python ./identify.py ./capture.bin --fit
 
 ## 文件
 
+- SysID.hpp：XRobot/YAML 入口、参数绑定和自动线程。
 - MotorIdentifier.hpp：Motor/CAN/IMU 适配与 Ozone 启停。
 - ImuFeedback.hpp：独立订阅角速度和姿态话题、检查新鲜度。
 - MotorSystemID.hpp：无硬件依赖的激励与采集核心，保留旧检查模式。
