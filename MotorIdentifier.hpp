@@ -124,9 +124,13 @@ class MotorIdentifier : public MotorSystem {
     units_confirmed_ =
         true;  // Driver mapping is configured by the application.
     const uint32_t STAMP = last_rx_us_;
+    // A CAN ISR may update STAMP after the earlier loop-start NOW snapshot.
+    // Read the clock AFTER loading STAMP; subtracting it from that older NOW
+    // would wrap and falsely report a fresh frame as more than 50 ms old.
+    const uint32_t CHECK_NOW =
+        static_cast<uint32_t>(LibXR::Timebase::GetMicroseconds());
     const bool FRESH =
-        STAMP != 0 &&
-        static_cast<uint32_t>(static_cast<uint32_t>(NOW) - STAMP) <= 50000U;
+        STAMP != 0 && static_cast<uint32_t>(CHECK_NOW - STAMP) <= 50000U;
     if (status_ == Status::RUNNING &&
         (!FRESH || (COMMAND == 1 && FB.state != 1)))
       return Finish(Status::FEEDBACK_LOST);

@@ -6,9 +6,17 @@ struct FakeMotor : Motor {
   Feedback fb;
   float output = 0;
   int sends = 0, relaxes = 0, enables = 0;
-  LibXR::ErrorCode Update() override { return LibXR::ErrorCode::OK; }
-  const Feedback& GetFeedback() override { return fb; }
-  void Control(const MotorCmd& cmd) override {
+  LibXR::CAN *interrupt_can = nullptr;
+  LibXR::ErrorCode Update() override {
+    // Receive after Poll captured NOW, as an actual CAN ISR can do.
+    if (interrupt_can) {
+      LibXR::Timebase::now += 10;
+      interrupt_can->Receive();
+    }
+    return LibXR::ErrorCode::OK;
+  }
+  const Feedback &GetFeedback() override { return fb; }
+  void Control(const MotorCmd &cmd) override {
     output = cmd.torque;
     ++sends;
   }
@@ -38,7 +46,7 @@ int main() {
   SysId::MotorIdentifier id(motor, can, 0x15);
   assert(id.BindImu("gyro", "euler", 2, -1));
   assert(!id.Poll() && motor.sends == 0);
-  LibXR::Timebase::now += 1000000;  // pause while idle must not abort startup
+  LibXR::Timebase::now += 1000000; // pause while idle must not abort startup
   id.command_ = 1;
   Imu();
   can.Receive();
@@ -106,7 +114,7 @@ int main() {
   id.Poll();
   assert(id.omega_imu_ == .4f && motor.fb.omega == 0);
   assert(motor.output <
-         -.04f);  // PD uses signed gyro, not the zero motor speed.
+         -.04f); // PD uses signed gyro, not the zero motor speed.
   LibXR::Timebase::now += 21000;
   can.Receive();
   id.Poll();
@@ -116,6 +124,23 @@ int main() {
   id.command_ = 1;
   id.Poll();
   assert(id.status_ == Status::PITCH_MOVED && motor.output == 0);
+  motor.interrupt_can = &can;
+  Imu();
+  id.command_ = 1;
+  LibXR::Timebase::now += 2000;
+  id.Poll();
+  assert(id.status_ == Status::RUNNING);
+  for (int n = 0; n < 30; ++n) {
+    Imu();
+    LibXR::Timebase::now += 2000;
+    id.Poll();
+    assert(id.status_ == Status::RUNNING && !id.done_);
+  }
+  motor.interrupt_can = nullptr;
+  Imu();
+  LibXR::Timebase::now += 51000;
+  id.Poll();
+  assert(id.status_ == Status::FEEDBACK_LOST && motor.output == 0);
   std::cout << "PASS: idle, one-command enable/output, stop, freeze, "
                "disconnect, travel, passive calibration, invalid command.\n";
 }
